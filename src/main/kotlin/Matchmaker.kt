@@ -1,4 +1,4 @@
-    import org.goochjs.glicko2.Rating
+import org.goochjs.glicko2.Rating
 import org.goochjs.glicko2.RatingCalculator
 import org.goochjs.glicko2.RatingPeriodResults
 import org.jetbrains.exposed.sql.*
@@ -141,7 +141,7 @@ fun runBattles(robocodePath: File, battlePath: File, resultPath: File, replayPat
     if (!replayPath.exists()) {
         println("Creating dir $replayPath"); replayPath.mkdir()
     } else {
-        resultPath.listFiles().forEach { it.delete() }
+        replayPath.listFiles().forEach { it.delete() }
     }
 
     val processes = mutableListOf<Process>()
