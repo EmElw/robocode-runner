@@ -1,0 +1,5 @@
+each generation, glicko t=1:
+create pairings, match all against all (or N closest rated to avoid big n²)
+generate battles (sample.battle for a template), 1v1
+calculate rating, push to db
+
