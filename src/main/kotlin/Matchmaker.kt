@@ -1,21 +1,10 @@
-import org.goochjs.glicko2.Rating
+    import org.goochjs.glicko2.Rating
 import org.goochjs.glicko2.RatingCalculator
 import org.goochjs.glicko2.RatingPeriodResults
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.io.File
 import java.sql.Connection.TRANSACTION_SERIALIZABLE
-
-// TODO fixa läsbara instruktioner
-
-const val DEVELOP = false
-
-const val BASE_PATH = "/home/magnus/robocode"
-const val ROBOT_PATH = "${BASE_PATH}/robots"
-const val BATTLE_PATH = "${BASE_PATH}/battles"
-const val RESULT_PATH = "${BASE_PATH}/results"
-const val REPLAY_PATH = "${BASE_PATH}/replay"
-const val DATABASE_PATH = "${BASE_PATH}/robocodedb"
 
 const val BASE_RATING = 1500.0
 const val BASE_RD = 350.0
@@ -31,8 +20,25 @@ const val BATTLE_TEMPLATE = "#Battle Properties\n" +
 
 data class RobotID(val name: String, val version: String)
 
-fun main() {
-    generation()
+fun compareVersions(strLeft: String, strRight: String): Int {
+    val numLeft = strLeft.split('.').map { it.filter { c -> c.isDigit() } }.map { it.toInt() }
+    val numRight = strRight.split('.').map { it.toInt() }
+    numLeft.zip(numRight).forEach { (l, r) ->
+        if (l.compareTo(r) != 0) return l.compareTo(r)
+    }
+    return 0
+}
+
+fun main(args: Array<String>) {
+    val base = args[0]
+    generation(
+        basePath = base,
+        databasePath = "$base/robocodedb",
+        robotPath = "$base/robots",
+        battlePath = "$base/battles",
+        resultPath = "$base/results",
+        replayPath = "$base/replay"
+    )
 }
 
 /**
@@ -43,53 +49,68 @@ fun main() {
  *  - updates the ratings, writing into DB
  *
  *  very side-effect, wow
+ *
+ *  Some considerations:
+ *   - robots are expected to exist
+ *   - robots can only be deleted once obsoleted (higher version number)
  */
-fun generation() {
-    Database.connect("jdbc:sqlite:${DATABASE_PATH}", driver = "org.sqlite.JDBC")
+fun generation(
+    basePath: String,
+    databasePath: String,
+    robotPath: String,
+    battlePath: String,
+    resultPath: String,
+    replayPath: String
+) {
+    Database.connect("jdbc:sqlite:${databasePath}", driver = "org.sqlite.JDBC")
     transaction(TRANSACTION_SERIALIZABLE, 2) {
         SchemaUtils.create(DSLRobot)
-        if (DEVELOP) DSLRobot.deleteAll()
     }
 
-
-    val robotIDs = scanRobots(File(ROBOT_PATH)).take(10)
-
+    val robotIDs = scanRobots(File(robotPath)).take(10)
     robotIDs.forEach { id ->
-        if (robotIsUnrated(id)) createBaseRating(id, BASE_RATING, BASE_RD)
+        if (robotIsUnrated(id)) insertBaseRating(id, BASE_RATING, BASE_RD)
+        updateVersion(id)
     }
-    val robots = getRobots()
-
+    val robots = getRatedRobots()
 
     val matchups = generateMatchups(robots)
 
     generateBattles(
-        filePath = File(BATTLE_PATH),
+        filePath = File(battlePath),
         matchups = matchups
     )
 
     runBattles(
-        robocodePath = File(BASE_PATH),
-        battlePath = File(BATTLE_PATH),
-        resultPath = File(RESULT_PATH),
-        replayPath = File(REPLAY_PATH)
+        robocodePath = File(basePath),
+        battlePath = File(battlePath),
+        resultPath = File(resultPath),
+        replayPath = File(replayPath)
     )
 
     updateRatings(
         robots = robots,
-        resultPath = File(RESULT_PATH)
+        resultPath = File(resultPath)
     )
+}
+
+fun updateVersion(id: RobotID) {
+    transaction(TRANSACTION_SERIALIZABLE, 2) {
+        DSLRobot.update({ DSLRobot.name eq id.name }) {
+            it[DSLRobot.version] = id.version
+        }
+    }
 }
 
 fun generateMatchups(robots: List<Robot>): Collection<Pair<Robot, Robot>> {
     val sortedRobots = robots.sortedByDescending { it.rating }
-    val m = robots.flatMap { robot ->
+    return robots.flatMap { robot ->
         opponents(robot, sortedRobots)
-    }
-    return m.toSet()
+    }.toSet()
 }
 
 fun opponents(robot: Robot, robots: List<Robot>): List<Pair<Robot, Robot>> {
-    val opps = mutableSetOf<Robot>() // hello, don' think to much about it
+    val opps = mutableSetOf<Robot>() // hello, don't think to much about it
     if (robot != robots.first())
         opps.add(robots.first())
 
@@ -110,11 +131,15 @@ fun generateMatchupsAllVsAll(robots: List<Robot>): List<Pair<Robot, Robot>> =
         })
         list
     }
-// TODO naive implementation, all vs all
 
 fun runBattles(robocodePath: File, battlePath: File, resultPath: File, replayPath: File) {
     if (!resultPath.exists()) {
-        println("Creating dir: $resultPath"); resultPath.mkdir()
+        println("Creating dir $resultPath"); resultPath.mkdir()
+    } else {
+        resultPath.listFiles().forEach { it.delete() }
+    }
+    if (!replayPath.exists()) {
+        println("Creating dir $replayPath"); replayPath.mkdir()
     } else {
         resultPath.listFiles().forEach { it.delete() }
     }
@@ -127,7 +152,7 @@ fun runBattles(robocodePath: File, battlePath: File, resultPath: File, replayPat
         .sorted()
         .forEach { battle ->
             val bName = battle.nameWithoutExtension
-            val replay = if (bName.contains("replay")) " -replay $replayPath" else ""
+            val replay = if (bName[1] == 'r') " -record $replayPath/$bName" else ""
             val cmd = "bash ${robocodePath}/robocode.sh -nodisplay " +
                     "-battle $battle " +
                     "-results ${resultPath}/$bName.result$replay"
@@ -160,9 +185,6 @@ fun updateRatings(robots: List<Robot>, resultPath: File) {
             calc.defaultVolatility
         )
     }
-    val ratingsBefore = ratings.map { rating ->
-        rating.uid to rating.rating
-    }
     val period = RatingPeriodResults()
     results.forEach { match ->
         period.addResult(
@@ -171,13 +193,16 @@ fun updateRatings(robots: List<Robot>, resultPath: File) {
         )
     }
     calc.updateRatings(period)
-    ratings.forEach { rating ->
-        val ratingBefore = ratingsBefore.find { (uid, _) -> rating.uid == uid }!!.second
+    ratings.sortedBy { it.rating }.forEach { rating ->
+        val version = robots.find { it.name == rating.uid }!!.version
         println(
             "${rating.uid.padEnd(
                 40,
                 ' '
-            )} (${rating.numberOfResults} matches) -- $ratingBefore to ${rating.rating} (diff: ${ratingBefore - rating.rating}"
+            )}${version.padEnd(
+                8,
+                ' '
+            )}(${rating.numberOfResults} matches) -- r: ${rating.rating}, rd: ${rating.ratingDeviation}"
         )
     }
     transaction(TRANSACTION_SERIALIZABLE, 2) {
@@ -213,13 +238,13 @@ fun generateBattles(filePath: File, matchups: Collection<Pair<Robot, Robot>>) {
             println("Failed deleting battle: $it")
     }
     val digits = matchups.size.toString().length
-    matchups.forEachIndexed { i, (r1, r2) ->
+    matchups.shuffled().forEachIndexed { i, (r1, r2) ->
         val number = i.toString().padStart(digits, '0')
-
+        val replay = if (i < 10) "r" else "n"
         val content = BATTLE_TEMPLATE
             .replace("{r1}", "${r1.name} ${r1.version}")
             .replace("{r2}", "${r2.name} ${r2.version}")
-        val output = File("${filePath}/autobattle${number}.battle")
+        val output = File("${filePath}/b$replay${number}-${r1.name}_${r1.version}-vs-${r2.name}_${r2.version}.battle")
         output.writeText(content)
     }
 }
@@ -227,14 +252,19 @@ fun generateBattles(filePath: File, matchups: Collection<Pair<Robot, Robot>>) {
 /**
  * Returns the name of all robots in the folder
  */
-fun scanRobots(robotsPath: File): List<RobotID> = robotsPath.listFiles()
-    .filter { it.isFile and (it.extension == "jar") } // TODO might need to validate, only select latest version of same named robot
+// TODO might need to validate, only select latest version of same named robot
+// TODO some fallback system could be nice if versions dont line up
+fun scanRobots(robotsPath: File): Collection<RobotID> = robotsPath.listFiles()
+    .filter { it.isFile and (it.extension == "jar") }
     .map {
         val splitName = it.nameWithoutExtension.split("_")
         val version = splitName.last()
         val name = splitName.dropLast(1).joinToString("_")
         RobotID(name, version)
     }
+    .sortedByDescending { it.version }
+    .distinctBy { it.name }
+
 
 /**
  * Return true if the robot cant be found in database
@@ -249,9 +279,9 @@ fun robotIsUnrated(robotName: RobotID): Boolean {
 }
 
 /**
- * Initializes a robot's career (r:1500, rd:350)
+ * Initializes a robot's career (r:1500, rd:350) in the database
  */
-fun createBaseRating(robotId: RobotID, baseRating: Double, baseRd: Double) {
+fun insertBaseRating(robotId: RobotID, baseRating: Double, baseRd: Double) {
     transaction(TRANSACTION_SERIALIZABLE, 2) {
         DSLRobot.insert {
             it[name] = robotId.name
@@ -265,7 +295,7 @@ fun createBaseRating(robotId: RobotID, baseRating: Double, baseRd: Double) {
 /**
  * Returns all robots in the database
  */
-fun getRobots(): List<Robot> {
+fun getRatedRobots(): List<Robot> {
     val robots = mutableListOf<Robot>()
     transaction(TRANSACTION_SERIALIZABLE, 2) {
         robots.addAll(DSLRobot.selectAll().map {
